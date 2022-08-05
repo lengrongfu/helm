@@ -21,9 +21,7 @@ import (
 
 func TestNewOCIPusher(t *testing.T) {
 	testfn := func(ops *options) {
-		if ops.registryClient == nil {
-			t.Fatalf("the OCIPusher's registryClient should not be null")
-		}
+		ops.insecureSkipVerifyTLS = true
 	}
 
 	p, err := NewOCIPusher(testfn)

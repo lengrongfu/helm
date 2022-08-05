@@ -145,6 +145,7 @@ type Constructor func(options ...Option) (Getter, error)
 type Provider struct {
 	Schemes []string
 	New     Constructor
+	Options []Option
 }
 
 // Provides returns true if the given scheme is supported by this Provider.
@@ -166,7 +167,7 @@ type Providers []Provider
 func (p Providers) ByScheme(scheme string) (Getter, error) {
 	for _, pp := range p {
 		if pp.Provides(scheme) {
-			return pp.New()
+			return pp.New(pp.Options...)
 		}
 	}
 	return nil, errors.Errorf("scheme %q not supported", scheme)
@@ -185,7 +186,8 @@ var ociProvider = Provider{
 // All finds all of the registered getters as a list of Provider instances.
 // Currently, the built-in getters and the discovered plugins with downloader
 // notations are collected.
-func All(settings *cli.EnvSettings) Providers {
+func All(settings *cli.EnvSettings, options ...Option) Providers {
+	ociProvider.Options = options
 	result := Providers{httpProvider, ociProvider}
 	pluginDownloaders, _ := collectPlugins(settings)
 	result = append(result, pluginDownloaders...)

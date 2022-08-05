@@ -19,13 +19,23 @@ package registry
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"github.com/pkg/errors"
+	"github.com/stretchr/testify/assert"
 	"io"
 	"io/ioutil"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,7 +76,7 @@ func (suite *RegistryClientTestSuite) SetupSuite() {
 	suite.Out = &out
 	credentialsFile := filepath.Join(suite.WorkspaceDir, CredentialsFileBasename)
 
-	// init test client
+	// before test client
 	var err error
 	suite.RegistryClient, err = NewClient(
 		ClientOptDebug(true),
@@ -186,6 +196,7 @@ func (suite *RegistryClientTestSuite) Test_1_Push() {
 
 	// push with prov
 	ref = fmt.Sprintf("%s/testrepo/%s:%s", suite.DockerRegistryHost, meta.Name, meta.Version)
+	fmt.Println("ref:", ref)
 	result, err := suite.RegistryClient.Push(chartData, ref, PushOptProvData(provData))
 	suite.Nil(err, "no error pushing good ref with prov")
 
@@ -370,4 +381,486 @@ func initCompromisedRegistryTestServer() string {
 
 	u, _ := url.Parse(s.URL)
 	return fmt.Sprintf("localhost:%s", u.Port())
+}
+
+func TestNewTLSConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   *Client
+		before func() error
+		err    error
+		done   func() error
+	}{
+		{
+			name: "caFile_is_not_exist",
+			args: &Client{
+				caFile: "/tmp/ca1.crt",
+			},
+			err: os.ErrNotExist,
+		},
+		{
+			name: "caFile_is_exist",
+			before: func() error {
+				file, err := os.Create("/tmp/ca.crt")
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+				fmt.Fprint(file, "a")
+				return nil
+			},
+			args: &Client{
+				caFile: "/tmp/ca.crt",
+			},
+			done: func() error {
+				os.RemoveAll("/tmp/ca.crt")
+				return nil
+			},
+		},
+		{
+			name: "keyFile_and_certFile_exist",
+			before: func() error {
+				max := new(big.Int).Lsh(big.NewInt(1), 128)
+				serialNumber, _ := rand.Int(rand.Reader, max)
+				subject := pkix.Name{
+					Country:            []string{"CN"},
+					Province:           []string{"BeiJing"},
+					Organization:       []string{"Devops"},
+					OrganizationalUnit: []string{"certDevops"},
+					CommonName:         "127.0.0.1",
+				}
+
+				template := x509.Certificate{
+					SerialNumber: serialNumber,
+					Subject:      subject,
+					NotBefore:    time.Now(),
+					NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+					KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+					ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+					IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+				}
+
+				pk, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+				derBytes, _ := x509.CreateCertificate(rand.Reader, &template, &template, &pk.PublicKey, pk)
+				certOut, _ := os.Create("/tmp/server.pem")
+				pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+				certOut.Close()
+
+				keyOut, _ := os.Create("/tmp/server.key")
+				pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(pk)})
+				keyOut.Close()
+				return nil
+			},
+			args: &Client{
+				keyFile:  "/tmp/server.key",
+				certFile: "/tmp/server.pem",
+			},
+			err: nil,
+			done: func() error {
+				os.RemoveAll("/tmp/server.key")
+				os.RemoveAll("/tmp/server.pem")
+				return nil
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if tt.done != nil {
+					tt.done()
+				}
+			}()
+			if tt.before != nil {
+				err := tt.before()
+				if err != nil {
+					t.Fatalf("tt.before() run error,err is %+v", err)
+				}
+			}
+			_, err := newTLSConfig(tt.args)
+			if err == nil && tt.err == nil {
+				return
+			}
+			if err != nil && tt.err == nil {
+				t.Fatalf("newTLSConfig error, excepte error is %+v, current error is %+v", tt.err, err)
+				return
+			}
+			if err == nil && tt.err != nil {
+				t.Fatalf("newTLSConfig error, excepte error is %+v, current error is %+v", tt.err, err)
+				return
+			}
+			if strings.Contains(err.Error(), tt.err.Error()) {
+				t.Fatalf("newTLSConfig error, excepte error is %+v, current error is %+v", tt.err, err)
+			}
+
+		})
+	}
+}
+
+func TestNewClient(t *testing.T) {
+	getLocalIP := func() (string, error) {
+		addrs, err := net.InterfaceAddrs()
+
+		if err != nil {
+			return "", err
+		}
+		for _, address := range addrs {
+			// filter loopback ip
+			if ipNet, ok := address.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+				if ipNet.IP.To4() != nil {
+					return ipNet.IP.String(), nil
+				}
+			}
+		}
+		return "", errors.New("can not find the client ip address")
+	}
+	ip, err := getLocalIP()
+	if err != nil {
+		t.Fatalf("getLocalIP is error %+v", err)
+	}
+	type ServerAndClientTSL struct {
+		ServerKey  string
+		ServerCert string
+		ClientKey  string
+		ClientCert string
+		CAKey      string
+		CaCert     string
+	}
+	doneRemoveFunc := func(keyAndCret *ServerAndClientTSL) error {
+		if keyAndCret != nil {
+			os.Remove(keyAndCret.CAKey)
+			os.Remove(keyAndCret.CaCert)
+			os.Remove(keyAndCret.ClientKey)
+			os.Remove(keyAndCret.ClientCert)
+			os.Remove(keyAndCret.ServerKey)
+			os.Remove(keyAndCret.ServerCert)
+		}
+		return nil
+	}
+	createCertificateFile := func(name string, cert *x509.Certificate, key *rsa.PrivateKey, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
+		if caKey == nil {
+			caKey = key
+		}
+		derBytes, _ := x509.CreateCertificate(rand.Reader, cert, caCert, &key.PublicKey, caKey)
+		certOut, _ := os.Create(name + ".pem")
+		pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+		certOut.Close()
+
+		keyOut, _ := os.Create(name + ".key")
+		pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+		keyOut.Close()
+	}
+	serverAndClientTSLKeyAndCret := func(i string) (*ServerAndClientTSL, error) {
+		max := new(big.Int).Lsh(big.NewInt(1), 128)
+		serialNumber, _ := rand.Int(rand.Reader, max)
+		subject := pkix.Name{
+			Country:            []string{"CN"},
+			Province:           []string{"BeiJing"},
+			Organization:       []string{"Devops"},
+			OrganizationalUnit: []string{"certDevops"},
+			CommonName:         ip,
+		}
+		ca := &x509.Certificate{
+			SerialNumber:          serialNumber,
+			Subject:               subject,
+			NotBefore:             time.Now(),
+			NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+			SubjectKeyId:          []byte{1, 2, 3, 4, 5},
+			BasicConstraintsValid: true,
+			IsCA:                  true,
+			ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+			KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+			IPAddresses:           []net.IP{net.ParseIP(ip)},
+		}
+		privCa, _ := rsa.GenerateKey(rand.Reader, 2048)
+		var (
+			caFileName     = fmt.Sprintf("%s_%s", "/tmp/ca", i)
+			serverFileName = fmt.Sprintf("%s_%s", "/tmp/server", i)
+			clientFileName = fmt.Sprintf("%s_%s", "/tmp/client", i)
+		)
+		createCertificateFile(caFileName, ca, privCa, ca, nil)
+		server := &x509.Certificate{
+			SerialNumber: serialNumber,
+			Subject:      subject,
+			NotBefore:    time.Now(),
+			NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+			SubjectKeyId: []byte{1, 2, 3, 4, 6},
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+			KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+			IPAddresses:  []net.IP{net.ParseIP(ip)},
+		}
+		privSer, _ := rsa.GenerateKey(rand.Reader, 2048)
+		createCertificateFile(serverFileName, server, privSer, ca, privCa)
+		client := &x509.Certificate{
+			SerialNumber: serialNumber,
+			Subject:      subject,
+			NotBefore:    time.Now(),
+			NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+			SubjectKeyId: []byte{1, 2, 3, 4, 7},
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+			KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+			IPAddresses:  []net.IP{net.ParseIP(ip)},
+		}
+		privCli, _ := rsa.GenerateKey(rand.Reader, 2048)
+		createCertificateFile(clientFileName, client, privCli, ca, privCa)
+
+		return &ServerAndClientTSL{
+			ServerCert: fmt.Sprintf("%s.pem", serverFileName),
+			ServerKey:  fmt.Sprintf("%s.key", serverFileName),
+			ClientCert: fmt.Sprintf("%s.pem", clientFileName),
+			ClientKey:  fmt.Sprintf("%s.key", clientFileName),
+			CaCert:     fmt.Sprintf("%s.pem", caFileName),
+			CAKey:      fmt.Sprintf("%s.key", caFileName),
+		}, nil
+	}
+	startRegistryServer := func(config *configuration.Configuration) (string, error) {
+		// Registry config
+		port, err := freeport.GetFreePort()
+		if err != nil {
+			return "", err
+		}
+		config.HTTP.Addr = fmt.Sprintf("%s:%d", ip, port)
+		config.HTTP.DrainTimeout = time.Duration(10) * time.Second
+		config.Storage = map[string]configuration.Parameters{"inmemory": map[string]interface{}{}}
+		dockerRegistry, err := registry.NewRegistry(context.Background(), config)
+		if err != nil {
+			return "", err
+		}
+		// Start Docker registry
+		go func() {
+			err = dockerRegistry.ListenAndServe()
+			if err != nil {
+				panic(err)
+				return
+			}
+		}()
+		return config.HTTP.Addr, nil
+	}
+	tests := []struct {
+		name   string
+		args   []ClientOption
+		before func() ([]ClientOption, string, *ServerAndClientTSL, error)
+		err    error
+		done   func(keyAndCret *ServerAndClientTSL) error
+		ctx    context.Context
+	}{
+		{
+			name: "ServerHttp_ClientOCI_NoOpenRegistryInsecurity_Fail", //OCI is default use https
+			before: func() ([]ClientOption, string, *ServerAndClientTSL, error) {
+				// start registry
+				config := &configuration.Configuration{}
+				refHostAndPort, err := startRegistryServer(config)
+				if err != nil {
+					return nil, "", nil, err
+				}
+				// config option
+				time.Sleep(1 * time.Second)
+				return nil, refHostAndPort, nil, nil
+			},
+			args: nil,
+			done: doneRemoveFunc,
+			err:  errors.New("http: server gave HTTP response to HTTPS client"),
+		},
+		{
+			name: "ServerHttp_ClientOCI_OpenRegistryInsecurity_PAAS", //OCI is default use https
+			before: func() ([]ClientOption, string, *ServerAndClientTSL, error) {
+				// start registry
+				config := &configuration.Configuration{}
+				refHostAndPort, err := startRegistryServer(config)
+				if err != nil {
+					return nil, "", nil, err
+				}
+				// config option
+				options := []ClientOption{
+					ClientPlainHTTP(),
+				}
+				time.Sleep(1 * time.Second)
+				return options, refHostAndPort, nil, nil
+			},
+			args: nil,
+			done: doneRemoveFunc,
+			err:  nil,
+		},
+		{
+			name: "ServerHttps_ClientNoUserHttps_Fail",
+			before: func() ([]ClientOption, string, *ServerAndClientTSL, error) {
+				keyAndCret, err := serverAndClientTSLKeyAndCret("3")
+				if err != nil {
+					return nil, "", nil, err
+				}
+				// start https registry
+				config := &configuration.Configuration{}
+				config.HTTP.TLS.Key = keyAndCret.ServerKey
+				config.HTTP.TLS.Certificate = keyAndCret.ServerCert
+				refHostAndPort, err := startRegistryServer(config)
+				if err != nil {
+					return nil, "", keyAndCret, err
+				}
+				// config option
+				time.Sleep(1 * time.Second)
+				return nil, refHostAndPort, keyAndCret, nil
+			},
+			args: nil,
+			done: doneRemoveFunc,
+			err:  errors.New("certificate is not trusted"),
+		},
+		{
+			name: "ServerHttps_ClientUserSkipVerifyTLS_PASS",
+			before: func() ([]ClientOption, string, *ServerAndClientTSL, error) {
+				keyAndCret, err := serverAndClientTSLKeyAndCret("4")
+				if err != nil {
+					return nil, "", nil, err
+				}
+				// start https registry
+				config := &configuration.Configuration{}
+				config.HTTP.TLS.Key = keyAndCret.ServerKey
+				config.HTTP.TLS.Certificate = keyAndCret.ServerCert
+				refHostAndPort, err := startRegistryServer(config)
+				if err != nil {
+					return nil, "", keyAndCret, err
+				}
+				// config option
+				options := []ClientOption{
+					ClientOptInsecureSkipVerifyTLS(true),
+				}
+				time.Sleep(1 * time.Second)
+				return options, refHostAndPort, keyAndCret, nil
+			},
+			args: nil,
+			done: doneRemoveFunc,
+			err:  nil,
+		},
+		{
+			name: "ServerHttps_ClientUserHttps_PASS",
+			before: func() ([]ClientOption, string, *ServerAndClientTSL, error) {
+				keyAndCret, err := serverAndClientTSLKeyAndCret("5")
+				if err != nil {
+					return nil, "", nil, err
+				}
+				// start https registry
+				config := &configuration.Configuration{}
+				config.HTTP.TLS.Key = keyAndCret.ServerKey
+				config.HTTP.TLS.Certificate = keyAndCret.ServerCert
+				refHostAndPort, err := startRegistryServer(config)
+				if err != nil {
+					return nil, "", keyAndCret, err
+				}
+				// config option
+				options := []ClientOption{
+					ClientOptTLSConfig(keyAndCret.CaCert, "", ""),
+				}
+				time.Sleep(1 * time.Second)
+				return options, refHostAndPort, keyAndCret, nil
+			},
+			args: nil,
+			done: doneRemoveFunc,
+			err:  nil,
+		},
+	}
+	for _, test := range tests {
+		tt := test
+		t.Run(tt.name, func(t *testing.T) {
+
+			var (
+				refHostAndPort string
+				options        []ClientOption
+				err            error
+				keyAndCret     *ServerAndClientTSL
+			)
+			defer func() {
+				if tt.done != nil {
+					tt.done(keyAndCret)
+				}
+			}()
+			if tt.before != nil {
+				options, refHostAndPort, keyAndCret, err = tt.before()
+				if err != nil {
+					t.Fatalf("%s test task fail,error is %+v", tt.name, err)
+					return
+				}
+				tt.args = options
+			}
+			client, err := NewClient(tt.args...)
+			if err != nil {
+				t.Fatalf("%s test task fail,error is %+v", tt.name, err)
+				return
+			}
+
+			chartData, err := ioutil.ReadFile("../downloader/testdata/signtest-0.1.0.tgz")
+			if err != nil {
+				t.Fatalf("no error loading test chart")
+				return
+			}
+			meta, err := extractChartMeta(chartData)
+			if err != nil {
+				t.Fatalf("no error extracting chart meta")
+				return
+			}
+			// Load prov file
+			provData, err := ioutil.ReadFile("../downloader/testdata/signtest-0.1.0.tgz.prov")
+			if err != nil {
+				t.Fatalf("no error loading test prov")
+				return
+			}
+
+			// push with prov
+			href := fmt.Sprintf("%s/testrepo", refHostAndPort)
+			ref := fmt.Sprintf("%s:%s",
+				path.Join(strings.TrimPrefix(href, fmt.Sprintf("%s://", "oci")), meta.Name),
+				meta.Version)
+			t.Logf("helm push to:%s", ref)
+			result, err := client.Push(chartData, ref, PushOptProvData(provData))
+			if err != nil {
+				t.Logf(err.Error())
+				if tt.err == nil {
+					t.Fatalf("client push error, expect error is %+v,current error is %+v", tt.err, err)
+					return
+				}
+				if tt.err != nil && !strings.Contains(err.Error(), tt.err.Error()) {
+					t.Fatalf("client push error, expect error is %+v,current error is %+v", tt.err, err)
+					return
+				}
+			}
+			_, err = client.Pull(ref)
+			if err != nil {
+				if tt.err == nil {
+					t.Fatalf("no error pulling a simple chart")
+					return
+				}
+				if tt.err != nil && !strings.Contains(err.Error(), tt.err.Error()) {
+					t.Fatalf("no error pulling a simple chart")
+					return
+				}
+			}
+
+			if tt.err != nil {
+				return
+			}
+
+			// Validate the output
+			// Note: these digests/sizes etc may change if the test chart/prov files are modified,
+			// or if the format of the OCI manifest changes
+			assertions := assert.New(t)
+			assertions.Equal(ref, result.Ref)
+			assertions.Equal(meta.Name, result.Chart.Meta.Name)
+			assertions.Equal(meta.Version, result.Chart.Meta.Version)
+			assertions.Equal(int64(512), result.Manifest.Size)
+			assertions.Equal(int64(99), result.Config.Size)
+			assertions.Equal(int64(973), result.Chart.Size)
+			assertions.Equal(int64(695), result.Prov.Size)
+			assertions.Equal(
+				"sha256:af4c20a1df1431495e673c14ecfa3a2ba24839a7784349d6787cd67957392e83",
+				result.Manifest.Digest)
+			assertions.Equal(
+				"sha256:8d17cb6bf6ccd8c29aace9a658495cbd5e2e87fc267876e86117c7db681c9580",
+				result.Config.Digest)
+			assertions.Equal(
+				"sha256:e5ef611620fb97704d8751c16bab17fedb68883bfb0edc76f78a70e9173f9b55",
+				result.Chart.Digest)
+			assertions.Equal(
+				"sha256:b0a02b7412f78ae93324d48df8fcc316d8482e5ad7827b5b238657a29a22f256",
+				result.Prov.Digest)
+		})
+	}
+
 }

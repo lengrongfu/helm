@@ -18,7 +18,6 @@ package pusher
 
 import (
 	"github.com/pkg/errors"
-
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/registry"
 )
@@ -27,7 +26,11 @@ import (
 //
 // Pushers may or may not ignore these parameters as they are passed in.
 type options struct {
-	registryClient *registry.Client
+	certFile              string
+	keyFile               string
+	caFile                string
+	insecureSkipVerifyTLS bool
+	registryClient        *registry.Client
 }
 
 // Option allows specifying various settings configurable by the user for overriding the defaults
@@ -38,6 +41,22 @@ type Option func(*options)
 func WithRegistryClient(client *registry.Client) Option {
 	return func(opts *options) {
 		opts.registryClient = client
+	}
+}
+
+// WithInsecureSkipVerifyTLS determines if a TLS Certificate will be checked
+func WithInsecureSkipVerifyTLS(insecureSkipVerifyTLS bool) Option {
+	return func(opts *options) {
+		opts.insecureSkipVerifyTLS = insecureSkipVerifyTLS
+	}
+}
+
+// WithTLSClientConfig sets the client auth with the provided credentials.
+func WithTLSClientConfig(certFile, keyFile, caFile string) Option {
+	return func(opts *options) {
+		opts.certFile = certFile
+		opts.keyFile = keyFile
+		opts.caFile = caFile
 	}
 }
 
@@ -55,6 +74,7 @@ type Constructor func(options ...Option) (Pusher, error)
 type Provider struct {
 	Schemes []string
 	New     Constructor
+	Options []Option
 }
 
 // Provides returns true if the given scheme is supported by this Provider.
@@ -76,7 +96,7 @@ type Providers []Provider
 func (p Providers) ByScheme(scheme string) (Pusher, error) {
 	for _, pp := range p {
 		if pp.Provides(scheme) {
-			return pp.New()
+			return pp.New(pp.Options...)
 		}
 	}
 	return nil, errors.Errorf("scheme %q not supported", scheme)
@@ -89,7 +109,8 @@ var ociProvider = Provider{
 
 // All finds all of the registered pushers as a list of Provider instances.
 // Currently, just the built-in pushers are collected.
-func All(settings *cli.EnvSettings) Providers {
+func All(settings *cli.EnvSettings, options ...Option) Providers {
+	ociProvider.Options = options
 	result := Providers{ociProvider}
 	return result
 }

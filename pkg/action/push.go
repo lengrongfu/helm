@@ -29,6 +29,7 @@ import (
 //
 // It provides the implementation of 'helm push'.
 type Push struct {
+	ChartPathOptions
 	Settings *cli.EnvSettings
 	cfg      *Configuration
 }
@@ -55,10 +56,13 @@ func NewPushWithOpts(opts ...PushOpt) *Push {
 // Run executes 'helm push' against the given chart archive.
 func (p *Push) Run(chartRef string, remote string) (string, error) {
 	var out strings.Builder
-
+	pushOptions := []pusher.Option{
+		pusher.WithInsecureSkipVerifyTLS(p.InsecureSkipTLSverify),
+		pusher.WithTLSClientConfig(p.CertFile, p.KeyFile, p.CaFile),
+	}
 	c := uploader.ChartUploader{
 		Out:     &out,
-		Pushers: pusher.All(p.Settings),
+		Pushers: pusher.All(p.Settings, pushOptions...),
 		Options: []pusher.Option{},
 	}
 

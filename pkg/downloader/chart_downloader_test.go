@@ -61,7 +61,7 @@ func TestResolveChartRef(t *testing.T) {
 		Getters: getter.All(&cli.EnvSettings{
 			RepositoryConfig: repoConfig,
 			RepositoryCache:  repoCache,
-		}),
+		}, nil),
 	}
 
 	for _, tt := range tests {
@@ -101,7 +101,7 @@ func TestResolveChartOpts(t *testing.T) {
 		Getters: getter.All(&cli.EnvSettings{
 			RepositoryConfig: repoConfig,
 			RepositoryCache:  repoCache,
-		}),
+		}, nil),
 	}
 
 	// snapshot options
@@ -189,7 +189,7 @@ func TestDownloadTo(t *testing.T) {
 		Getters: getter.All(&cli.EnvSettings{
 			RepositoryConfig: repoConfig,
 			RepositoryCache:  repoCache,
-		}),
+		}, nil),
 		Options: []getter.Option{
 			getter.WithBasicAuth("username", "password"),
 			getter.WithPassCredentialsAll(false),
@@ -243,7 +243,7 @@ func TestDownloadTo_TLS(t *testing.T) {
 		Getters: getter.All(&cli.EnvSettings{
 			RepositoryConfig: repoConfig,
 			RepositoryCache:  repoCache,
-		}),
+		}, nil),
 		Options: []getter.Option{},
 	}
 	cname := "test/signtest"
@@ -291,7 +291,7 @@ func TestDownloadTo_VerifyLater(t *testing.T) {
 		Getters: getter.All(&cli.EnvSettings{
 			RepositoryConfig: repoConfig,
 			RepositoryCache:  repoCache,
-		}),
+		}, nil),
 	}
 	cname := "/signtest-0.1.0.tgz"
 	where, _, err := c.DownloadTo(srv.URL()+cname, "", dest)
@@ -320,7 +320,7 @@ func TestScanReposForURL(t *testing.T) {
 		Getters: getter.All(&cli.EnvSettings{
 			RepositoryConfig: repoConfig,
 			RepositoryCache:  repoCache,
-		}),
+		}, nil),
 	}
 
 	u := "http://example.com/alpine-0.2.0.tgz"

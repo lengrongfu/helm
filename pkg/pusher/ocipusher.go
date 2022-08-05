@@ -85,22 +85,21 @@ func (pusher *OCIPusher) push(chartRef, href string) error {
 
 // NewOCIPusher constructs a valid OCI client as a Pusher
 func NewOCIPusher(ops ...Option) (Pusher, error) {
-	registryClient, err := registry.NewClient(
-		registry.ClientOptEnableCache(true),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	client := OCIPusher{
-		opts: options{
-			registryClient: registryClient,
-		},
-	}
-
+	client := OCIPusher{}
 	for _, opt := range ops {
 		opt(&client.opts)
 	}
+	registryClientOptions := []registry.ClientOption{
+		registry.ClientOptEnableCache(true),
+		registry.ClientOptInsecureSkipVerifyTLS(client.opts.insecureSkipVerifyTLS),
+		registry.ClientOptTLSConfig(client.opts.caFile, client.opts.keyFile, client.opts.certFile),
+	}
+
+	registryClient, err := registry.NewClient(registryClientOptions...)
+	if err != nil {
+		return nil, err
+	}
+	client.opts.registryClient = registryClient
 
 	return &client, nil
 }

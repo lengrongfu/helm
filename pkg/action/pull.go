@@ -76,11 +76,15 @@ func NewPullWithOpts(opts ...PullOpt) *Pull {
 func (p *Pull) Run(chartRef string) (string, error) {
 	var out strings.Builder
 
+	getterOptions := []getter.Option{
+		getter.WithInsecureSkipVerifyTLS(p.InsecureSkipTLSverify),
+		getter.WithTLSClientConfig(p.CertFile, p.KeyFile, p.CaFile),
+	}
 	c := downloader.ChartDownloader{
 		Out:     &out,
 		Keyring: p.Keyring,
 		Verify:  downloader.VerifyNever,
-		Getters: getter.All(p.Settings),
+		Getters: getter.All(p.Settings, getterOptions...),
 		Options: []getter.Option{
 			getter.WithBasicAuth(p.Username, p.Password),
 			getter.WithPassCredentialsAll(p.PassCredentialsAll),
@@ -116,7 +120,7 @@ func (p *Pull) Run(chartRef string) (string, error) {
 	}
 
 	if p.RepoURL != "" {
-		chartURL, err := repo.FindChartInAuthAndTLSAndPassRepoURL(p.RepoURL, p.Username, p.Password, chartRef, p.Version, p.CertFile, p.KeyFile, p.CaFile, p.InsecureSkipTLSverify, p.PassCredentialsAll, getter.All(p.Settings))
+		chartURL, err := repo.FindChartInAuthAndTLSAndPassRepoURL(p.RepoURL, p.Username, p.Password, chartRef, p.Version, p.CertFile, p.KeyFile, p.CaFile, p.InsecureSkipTLSverify, p.PassCredentialsAll, getter.All(p.Settings, getterOptions...))
 		if err != nil {
 			return out.String(), err
 		}

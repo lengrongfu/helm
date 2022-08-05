@@ -18,16 +18,19 @@ package registry // import "helm.sh/helm/v3/pkg/registry"
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/containerd/containerd/remotes"
+	"github.com/docker/go-connections/tlsconfig"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"oras.land/oras-go/pkg/auth"
@@ -56,12 +59,16 @@ type (
 		debug       bool
 		enableCache bool
 		// path to repository config file e.g. ~/.docker/config.json
-		credentialsFile    string
-		out                io.Writer
-		authorizer         auth.Client
-		registryAuthorizer *registryauth.Client
-		resolver           remotes.Resolver
-		PlainHTTP          bool
+		credentialsFile       string
+		out                   io.Writer
+		authorizer            auth.Client
+		registryAuthorizer    *registryauth.Client
+		resolver              remotes.Resolver
+		plainHTTP             bool
+		certFile              string
+		keyFile               string
+		caFile                string
+		insecureSkipVerifyTLS bool
 	}
 
 	// ClientOption allows specifying various settings configurable by the user for overriding the defaults
@@ -91,9 +98,37 @@ func NewClient(options ...ClientOption) (*Client, error) {
 		headers := http.Header{}
 		headers.Set("User-Agent", version.GetUserAgent())
 		opts := []auth.ResolverOption{auth.WithResolverHeaders(headers)}
-		if client.PlainHTTP {
+
+		// server is http protocol, client use http protocol
+		if client.plainHTTP {
 			opts = append(opts, auth.WithResolverPlainHTTP())
 		}
+
+		// server is https protocol, client skip tls verify
+		if client.insecureSkipVerifyTLS {
+			registryClient := http.DefaultClient
+			registryClient.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
+			}
+			opts = append(opts, auth.WithResolverClient(registryClient))
+		}
+
+		// server is https protocol, client user ca or cert|key file verify
+		if (client.certFile != "" && client.keyFile != "") || client.caFile != "" {
+			registryClient := http.DefaultClient
+
+			tlsConfig, err := newTLSConfig(client)
+			if err != nil {
+				return nil, err
+			}
+			registryClient.Transport = &http.Transport{
+				TLSClientConfig: tlsConfig,
+			}
+			opts = append(opts, auth.WithResolverClient(registryClient))
+		}
+
 		resolver, err := client.authorizer.ResolverWithOpts(opts...)
 		if err != nil {
 			return nil, err
@@ -142,6 +177,44 @@ func NewClient(options ...ClientOption) (*Client, error) {
 	return client, nil
 }
 
+func newTLSConfig(client *Client) (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		// Prefer TLS1.2 as the client minimum
+		MinVersion: tls.VersionTLS12,
+	}
+
+	if client.caFile != "" {
+		_, err := os.Stat(client.caFile)
+		if err != nil {
+			return nil, err
+		}
+		if tlsCfg.RootCAs == nil {
+			systemPool, _ := tlsconfig.SystemCertPool()
+			tlsCfg.RootCAs = systemPool
+		}
+		data, err := ioutil.ReadFile(client.caFile)
+		if err != nil {
+			return nil, err
+		}
+		tlsCfg.RootCAs.AppendCertsFromPEM(data)
+	}
+
+	if client.keyFile != "" && client.certFile != "" {
+		if _, keyErr := os.Stat(client.keyFile); keyErr != nil {
+			return nil, keyErr
+		}
+		if _, cerErr := os.Stat(client.certFile); cerErr != nil {
+			return nil, cerErr
+		}
+		cert, err := tls.LoadX509KeyPair(client.certFile, client.keyFile)
+		if err != nil {
+			return nil, err
+		}
+		tlsCfg.Certificates = append(tlsCfg.Certificates, cert)
+	}
+	return tlsCfg, nil
+}
+
 // ClientOptDebug returns a function that sets the debug setting on client options set
 func ClientOptDebug(debug bool) ClientOption {
 	return func(client *Client) {
@@ -170,10 +243,24 @@ func ClientOptCredentialsFile(credentialsFile string) ClientOption {
 	}
 }
 
-// ClientPlainHTTP returns a function that sets the PlainHTTP setting to true on resolver. use http schema transport data
+// ClientPlainHTTP returns a function that sets the plainHTTP setting to true on resolver. use http schema transport data
 func ClientPlainHTTP() ClientOption {
 	return func(client *Client) {
-		client.PlainHTTP = true
+		client.plainHTTP = true
+	}
+}
+
+func ClientOptInsecureSkipVerifyTLS(insecureSkipVerifyTLS bool) ClientOption {
+	return func(client *Client) {
+		client.insecureSkipVerifyTLS = insecureSkipVerifyTLS
+	}
+}
+
+func ClientOptTLSConfig(caFile, keyFile, certFile string) ClientOption {
+	return func(client *Client) {
+		client.caFile = caFile
+		client.keyFile = keyFile
+		client.certFile = certFile
 	}
 }
 
@@ -204,6 +291,7 @@ func (c *Client) Login(host string, options ...LoginOption) error {
 	if operation.insecure {
 		authorizerLoginOpts = append(authorizerLoginOpts, auth.WithLoginInsecure())
 	}
+	authorizerLoginOpts = append(authorizerLoginOpts, auth.WithLoginTLS("", "", "/Users/lengrongfu/Downloads/ca.crt"))
 	if err := c.authorizer.LoginWithOpts(authorizerLoginOpts...); err != nil {
 		return err
 	}

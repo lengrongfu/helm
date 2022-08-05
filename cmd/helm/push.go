@@ -48,7 +48,11 @@ func newPushCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 				return nil, cobra.ShellCompDirectiveDefault
 			}
 			if len(args) == 1 {
-				providers := []pusher.Provider(pusher.All(settings))
+				pushOptions := []pusher.Option{
+					pusher.WithInsecureSkipVerifyTLS(client.InsecureSkipTLSverify),
+					pusher.WithTLSClientConfig(client.CertFile, client.KeyFile, client.CaFile),
+				}
+				providers := []pusher.Provider(pusher.All(settings, pushOptions...))
 				var comps []string
 				for _, p := range providers {
 					for _, scheme := range p.Schemes {
@@ -71,6 +75,9 @@ func newPushCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
 			return nil
 		},
 	}
+
+	f := cmd.Flags()
+	addChartPathOptionsFlags(f, &client.ChartPathOptions)
 
 	return cmd
 }

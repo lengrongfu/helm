@@ -26,6 +26,7 @@ func TestProvider(t *testing.T) {
 	p := Provider{
 		[]string{"one", "three"},
 		func(_ ...Option) (Pusher, error) { return nil, nil },
+		nil,
 	}
 
 	if !p.Provides("three") {
@@ -35,8 +36,8 @@ func TestProvider(t *testing.T) {
 
 func TestProviders(t *testing.T) {
 	ps := Providers{
-		{[]string{"one", "three"}, func(_ ...Option) (Pusher, error) { return nil, nil }},
-		{[]string{"two", "four"}, func(_ ...Option) (Pusher, error) { return nil, nil }},
+		{[]string{"one", "three"}, func(_ ...Option) (Pusher, error) { return nil, nil }, nil},
+		{[]string{"two", "four"}, func(_ ...Option) (Pusher, error) { return nil, nil }, nil},
 	}
 
 	if _, err := ps.ByScheme("one"); err != nil {
@@ -56,6 +57,22 @@ func TestAll(t *testing.T) {
 	all := All(env)
 	if len(all) != 1 {
 		t.Errorf("expected 1 provider (OCI), got %d", len(all))
+	}
+}
+
+func TestAllOption(t *testing.T) {
+	env := cli.New()
+	opt := []Option{
+		WithInsecureSkipVerifyTLS(true),
+		WithTLSClientConfig("", "", ""),
+	}
+	providers := All(env, opt...)
+	if len(providers) != 1 {
+		t.Errorf("expected 1 provider (OCI), got %d", len(providers))
+	}
+	scheme, err := providers.ByScheme(registry.OCIScheme)
+	if err != nil || scheme == nil {
+		t.Errorf("scheme is nil or err is not nil,scheme:%+v, err: %+v", scheme, err)
 	}
 }
 
